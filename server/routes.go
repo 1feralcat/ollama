@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -869,6 +870,61 @@ func (s *Server) CreateBlobHandler(c *gin.Context) {
 	c.Status(http.StatusCreated)
 }
 
+func (s *Server) WebsiteHandler(c *gin.Context) {
+	basePath := os.Getenv("OLLAMA_WEBSITE")
+	if basePath == "" {
+		slog.Error("OLLAMA_WEBSITE is not set")
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	filename := c.Param("filename")
+	if filename == "" || filename == "/" {
+		filename = "index.html"
+	} else {
+		filename = strings.TrimPrefix(filename, "/")
+	}
+
+	filePath := filepath.Clean(filepath.Join(basePath, filename))
+	if !strings.HasPrefix(filePath, basePath) {
+		slog.Error("path traversal attempt detected", "filename", filename, "filePath", filePath)
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		slog.Error("error opening file", "error", err)
+		if os.IsNotExist(err) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusInternalServerError, "Error reading file")
+		return
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		slog.Error("error getting file info", "error", err)
+		c.String(http.StatusInternalServerError, "Error getting file info")
+		return
+	}
+	c.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+
+	contentType := mime.TypeByExtension(filepath.Ext(filename))
+	if contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+
+	c.Status(http.StatusOK)
+	_, err = io.Copy(c.Writer, file)
+	if err != nil {
+		slog.Error("error serving file", "error", err)
+		c.String(http.StatusInternalServerError, "Error serving file")
+		return
+	}
+}
 var defaultAllowOrigins = []string{
 	"localhost",
 	"127.0.0.1",
@@ -978,6 +1034,7 @@ func (s *Server) GenerateRoutes() http.Handler {
 		allowedHostsMiddleware(s.addr),
 	)
 
+	r.GET("/website/*filename", s.WebsiteHandler)
 	r.POST("/api/pull", s.PullModelHandler)
 	r.POST("/api/generate", s.GenerateHandler)
 	r.POST("/api/chat", s.ChatHandler)
